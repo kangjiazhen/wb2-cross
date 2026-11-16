@@ -148,11 +148,15 @@ key 的解析顺序：`--api-key` → `WBXC_API_KEY` → `DEEPSEEK_API_KEY` / `O
 
 | 平台 | 做法 |
 | --- | --- |
-| Windows | `~/.wb2-cross/bridge-supervisor.cmd` 守护循环（死 5 秒重生，spawn 前先查端口避免多副本抢 bind）+ Startup 里的 vbs 静默拉起。无需管理员。 |
+| Windows | 三件套：`~/.wb2-cross/bridge-supervisor.cmd` 守护循环（死 5 秒重生，spawn 前先查端口避免多副本抢 bind）、Startup 里的 vbs 在登录时静默拉起、计划任务 `wb2-cross-ensure` 每 5 分钟静默复查一次（经 `ensure-hidden.vbs` 由 wscript 启动，**不弹黑窗**）。无需管理员。 |
 | Linux | `install` 写出 `~/.wb2-cross/wb2-cross.service`：`systemctl --user enable --now ~/.wb2-cross/wb2-cross.service` |
 | macOS | 用同一份 `ExecStart` 包一个 `~/Library/LaunchAgents/*.plist`（`KeepAlive=true`） |
 
 不想装自启动：`install --no-autostart`，自己用 pm2 / supervisor / tmux 托管 `wb2-cross serve`。
+
+不想装看门狗（计划任务）：`install --no-watchdog`。
+
+> 为什么看门狗要绕一层 vbs：计划任务直接跑 `powershell.exe -WindowStyle Hidden` 时，**控制台窗口是先创建、再隐藏的**，所以每跑一次都会闪一下黑框。`wscript.exe` 是 GUI 子系统宿主，`Run(..., 0, False)` 根本不创建控制台，桌面上不会有任何闪动。
 
 ---
 
@@ -166,6 +170,7 @@ key 的解析顺序：`--api-key` → `WBXC_API_KEY` → `DEEPSEEK_API_KEY` / `O
 | 模型全被路由到默认模型 | 客户端发的名字不在上游目录里 | 正常回落；要看真实目录：`curl 127.0.0.1:7888/v1/models` |
 | 回答被渲染两遍 | 客户端 UI 行为（SSE 只有一组 delta） | 忽略 |
 | 注入某天突然失效 | 上游网关把 system 吞了 | 见上文「上游必须转发 system」 |
+| 每隔几分钟弹一个黑窗 | 计划任务/启动项里直接写了 `powershell.exe` 或 `.bat`（控制台先创建后隐藏） | 用 `wscript.exe` + vbs 包一层；本仓库的 `install` 已经这么做 |
 
 `doctor` 一次跑完：上游可达性、`/v1/models` 条数、身份探针、越界探针、注入层与 `max_tokens` 下限。
 
