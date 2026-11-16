@@ -191,4 +191,4 @@ node test/smoke.mjs
 
 MIT License. 只是本地代理，不做任何远程收集。
 
-宣传图（`docs/promo/`）里的角色为社区同人图，按 CC BY-NC-SA 4.0 单独授权，见 [docs/promo/README.md](docs/promo/README.md)。
+宣传图（`docs/promo/`）里的三位角色是社区同人形象（GPT 娘 / Claude 娘 / 鲸鱼娘），按 CC BY-NC-SA 4.0 单独授权，见 [docs/promo/README.md](docs/promo/README.md)。
