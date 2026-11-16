@@ -1,5 +1,7 @@
 # wb2-cross
 
+<img src="docs/promo/poster.png" alt="wb2-cross" width="620">
+
 **一个本地反向代理，同时接管 Codex 与 Claude Code。**
 
 Codex 说 Responses API，Claude Code 说 Anthropic Messages，两边都能接到**任意 OpenAI 兼容上游**（`api.deepseek.com`、`api.openai.com`、局域网里的账号池网关……）。翻译发生在本地 `127.0.0.1`，同时在这一跳里完成 system 层注入、模型路由与权限档位落地。
@@ -188,3 +190,5 @@ node test/smoke.mjs
 ---
 
 MIT License. 只是本地代理，不做任何远程收集。
+
+宣传图（`docs/promo/`）里的角色为社区同人图，按 CC BY-NC-SA 4.0 单独授权，见 [docs/promo/README.md](docs/promo/README.md)。
