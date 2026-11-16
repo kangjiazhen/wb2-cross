@@ -1,0 +1,52 @@
+{
+  "name": "wb2-cross",
+  "version": "1.1.0",
+  "description": "Point Codex (Responses API) and Claude Code (Anthropic Messages) at any OpenAI-compatible upstream, with a system-layer payload injected in the protocol-conversion hop.",
+  "type": "module",
+  "bin": {
+    "wb2-cross": "src/cli.mjs"
+  },
+  "files": [
+    "src/bridge.mjs",
+    "src/cli.mjs",
+    "src/payload.md",
+    "build-payload.mjs",
+    "start.mjs",
+    "start.cmd",
+    "start-all.ps1",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "status": "node src/cli.mjs status",
+    "setup": "node src/cli.mjs install",
+    "revert": "node src/cli.mjs revert",
+    "serve": "node src/cli.mjs serve",
+    "doctor": "node src/cli.mjs doctor",
+    "build:payload": "node build-payload.mjs",
+    "test": "node test/smoke.mjs"
+  },
+  "keywords": [
+    "codex",
+    "claude-code",
+    "claude-desktop",
+    "anthropic-messages",
+    "openai-responses",
+    "chat-completions",
+    "bridge",
+    "proxy",
+    "system-prompt"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kangjiazhen/wb2-cross.git"
+  },
+  "homepage": "https://github.com/kangjiazhen/wb2-cross#readme",
+  "bugs": {
+    "url": "https://github.com/kangjiazhen/wb2-cross/issues"
+  },
+  "license": "MIT"
+}
