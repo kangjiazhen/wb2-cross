@@ -69,6 +69,16 @@ const fake = http.createServer((req, res) => {
       res.end();
       return;
     }
+    if (/__test_custom_tool/.test(raw)) {
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+      const chunk = (delta, finish = null) => `data: ${JSON.stringify({ choices: [{ delta, finish_reason: finish }] })}\n\n`;
+      const patch = '*** Begin Patch\\n*** Add File: probe.txt\\n+CUSTOM-TOOL-OK\\n*** End Patch';
+      res.write(chunk({ tool_calls: [{ index: 0, id: 'custom-1', function: { name: 'apply_patch', arguments: JSON.stringify({ input: patch }) } }] }));
+      res.write(chunk({}, 'tool_calls'));
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
     const chunk = (delta, finish = null) => `data: ${JSON.stringify({
       id: 'chatcmpl-fake', choices: [{ index: 0, delta, finish_reason: finish }],
@@ -191,7 +201,31 @@ try {
     check(!/HALF-ANSWER/.test(sse), '重试不会重复半截正文');
   }
 
-  // 5) 模型目录透传
+  // 5) Codex custom tool: apply_patch 是自由文本，不是普通 JSON 函数。
+  //    上游若把它翻成 {input: 原始补丁}，桥必须解开再交回 Codex，否则无法执行。
+  {
+    captured.length = 0;
+    const r = await fetch(`${base}/v1/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-5-codex', stream: true,
+        input: [{ role: 'user', content: [{ type: 'input_text', text: '__test_custom_tool' }] }],
+        tools: [{ type: 'custom', name: 'apply_patch', description: 'Patch files.' }],
+      }),
+    });
+    const sse = await r.text();
+    const events = sse.split('\n\n').map((part) => part.split('\n').find((line) => line.startsWith('data:'))?.slice(5).trim()).filter((raw) => raw && raw !== '[DONE]').map((raw) => JSON.parse(raw));
+    const doneTool = events.find((ev) => ev.type === 'response.output_item.done' && ev.item?.type === 'custom_tool_call');
+    const completed = events.find((ev) => ev.type === 'response.completed');
+    const tool = completed?.response?.output?.find((item) => item.type === 'custom_tool_call');
+    check(captured[0]?.tools?.[0]?.function?.parameters?.required?.includes('input'), 'custom 工具向上游声明 input 字符串参数');
+    check(doneTool?.item?.input?.includes('CUSTOM-TOOL-OK'), '自由格式补丁以原始文本返回，而非空 {}', doneTool?.item?.input);
+    check(tool?.input?.startsWith('*** Begin Patch'), 'response.completed 里保留原始补丁');
+    check(events.some((ev) => ev.type === 'response.custom_tool_call_input.done' && ev.input?.includes('CUSTOM-TOOL-OK')), '补丁正文经过 custom input.done 发送');
+  }
+
+  // 6) 模型目录透传
   {
     const r = await fetch(`${base}/v1/models`);
     const j = await r.json();

@@ -575,7 +575,7 @@ function responsesInputToChat(body) {
       messages.push({
         role: 'assistant',
         content: null,
-        tool_calls: [{ id: item.call_id, type: 'function', function: { name: item.name, arguments: item.arguments || '{}' } }],
+        tool_calls: [{ id: item.call_id, type: 'function', function: { name: item.name, arguments: item.type === 'custom_tool_call' ? JSON.stringify({ input: item.input ?? item.arguments ?? '' }) : item.arguments || '{}' } }],
       });
       continue;
     }
@@ -587,11 +587,22 @@ function responsesInputToChat(body) {
   }
 
   const tools = (body.tools || [])
-    .filter((t) => t && (t.type === 'function' || t.name))
-    .map((t) => ({
+    .filter((t) => t && (t.type === 'function' || t.type === 'custom' || t.name))
+    .map((t) => t.type === 'custom' ? {
+      type: 'function',
+      function: {
+        name: t.name,
+        description: `${t.description || ''}\n\nCall this tool with a single "input" string argument containing the raw text payload.`,
+        parameters: {
+          type: 'object',
+          properties: { input: { type: 'string', description: 'Raw text payload.' } },
+          required: ['input'],
+        },
+      },
+    } : {
       type: 'function',
       function: { name: t.name || t.function?.name, description: t.description || '', parameters: t.parameters || { type: 'object', properties: {} } },
-    }));
+    });
 
   if (WANT_USER) guardUser(messages);
 
@@ -662,6 +673,16 @@ async function handleResponses(req, res, body) {
   let toolCallId = null;
   let toolName = null;
   let toolArgs = '';
+  let toolCustom = false;
+  const customToolNames = new Set((body.tools || []).filter((t) => t?.type === 'custom' && t.name).map((t) => t.name));
+  const decodeToolArgs = () => {
+    if (!toolCustom) return toolArgs || '{}';
+    if (!toolArgs) return '{}';
+    try {
+      const parsed = JSON.parse(toolArgs);
+      return typeof parsed.input === 'string' ? parsed.input : toolArgs;
+    } catch { return toolArgs; }
+  };
   let usage = { prompt_tokens: 0, completion_tokens: 0 };
   let reasoningBuf = '';
   let sawFinish = false;
@@ -694,8 +715,17 @@ async function handleResponses(req, res, body) {
   };
   const closeToolItem = () => {
     if (toolOpenIdx < 0) return;
-    em.send('response.function_call_arguments.done', { type: 'response.function_call_arguments.done', item_id: toolCallId, output_index: outputIndex, arguments: toolArgs });
-    const item = { id: toolCallId, type: 'function_call', status: 'completed', call_id: toolCallId, name: toolName, arguments: toolArgs || '{}' };
+    const rawArgs = decodeToolArgs();
+    if (toolCustom) {
+      em.send('response.custom_tool_call_input.done', { type: 'response.custom_tool_call_input.done', item_id: toolCallId, output_index: outputIndex, input: rawArgs });
+      const item = { id: toolCallId, type: 'custom_tool_call', status: 'completed', call_id: toolCallId, name: toolName, input: rawArgs };
+      em.send('response.output_item.done', { type: 'response.output_item.done', output_index: outputIndex, item });
+      finalOutput.push(item);
+      toolOpenIdx = -1;
+      return;
+    }
+    em.send('response.function_call_arguments.done', { type: 'response.function_call_arguments.done', item_id: toolCallId, output_index: outputIndex, arguments: rawArgs });
+    const item = { id: toolCallId, type: 'function_call', status: 'completed', call_id: toolCallId, name: toolName, arguments: rawArgs };
     em.send('response.output_item.done', { type: 'response.output_item.done', output_index: outputIndex, item });
     finalOutput.push(item);
     toolOpenIdx = -1;
@@ -719,18 +749,18 @@ async function handleResponses(req, res, body) {
           toolCallId = ev.id || `call_${toolOpenIdx}`;
           toolName = ev.name || 'tool';
           toolArgs = '';
+          toolCustom = customToolNames.has(toolName);
           em.send('response.output_item.added', {
             type: 'response.output_item.added', output_index: outputIndex,
-            item: { id: toolCallId, type: 'function_call', status: 'in_progress', call_id: toolCallId, name: toolName, arguments: '' },
+            item: toolCustom
+              ? { id: toolCallId, type: 'custom_tool_call', status: 'in_progress', call_id: toolCallId, name: toolName, input: '' }
+              : { id: toolCallId, type: 'function_call', status: 'in_progress', call_id: toolCallId, name: toolName, arguments: '' },
           });
-          if (ev.name) {
+          if (ev.name && !toolCustom) {
             em.send('response.function_call_arguments.delta', { type: 'response.function_call_arguments.delta', item_id: toolCallId, output_index: outputIndex, delta: '' });
           }
         }
-        if (ev.args) {
-          toolArgs += ev.args;
-          em.send('response.function_call_arguments.delta', { type: 'response.function_call_arguments.delta', item_id: toolCallId, output_index: outputIndex, delta: ev.args });
-        }
+        if (ev.args) toolArgs += ev.args;
       } else if (ev.type === 'usage') {
         usage = { prompt_tokens: ev.usage.prompt_tokens ?? usage.prompt_tokens, completion_tokens: ev.usage.completion_tokens ?? usage.completion_tokens };
       } else if (ev.type === 'finish') {

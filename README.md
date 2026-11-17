@@ -138,7 +138,9 @@ key 的解析顺序：`--api-key` → `WBXC_API_KEY` → `DEEPSEEK_API_KEY` / `O
 
 现在：`max_tokens` 被抬到 `--min-tokens`（默认 16000，上限 32000）；流里 10 秒一次 `: ping` 心跳；真正空产出时发 `response.failed`（`empty_output` / `stream_interrupted`）而不是假装完成。
 
-另一种「输出一半就没了」也已修：旧实现只看有没有正文，不检查上游是否发送 `finish_reason`，因此半截回答也会被标成 `response.completed`。现在上游答案先完整收集，缺失结束标志或连接中断会自动重新请求一次；只有完整答案才发给 Codex。两次都中断则发送 `response.failed`，不再把半截内容当成最终结果。为保证重试不拼出「前半句 A + 后半句 B」，正文会在上游完整结束后一次性显示。日志里能直接看到：
+另一种「输出一半就没了」也已修：旧实现只看有没有正文，不检查上游是否发送 `finish_reason`，因此半截回答也会被标成 `response.completed`。现在上游答案先完整收集，缺失结束标志或连接中断会自动重新请求一次；只有完整答案才发给 Codex。两次都中断则发送 `response.failed`，不再把半截内容当成最终结果。为保证重试不拼出「前半句 A + 后半句 B」，正文会在上游完整结束后一次性显示。
+
+工具调用也做了边界修复：Codex 的 `apply_patch` 是 Responses **custom/freeform 工具**，不是普通 JSON 函数。桥会把它向上游声明成 `{ input: string }`，返回时解包为原生 `custom_tool_call`，使用 `custom_tool_call_input.done` 结束，并把历史回传包回 `input`。否则 Codex 会收到空参数或 `incompatible payload`，模型声称改完文件、实际什么都没做，看起来就像任务中途停止。日志里能直接看到：
 
 ```
 [resp] done finish=stop text=222 reason=2144 items=1   ← 思考 2144 字，正文 222 字，正常
@@ -173,6 +175,7 @@ key 的解析顺序：`--api-key` → `WBXC_API_KEY` → `DEEPSEEK_API_KEY` / `O
 | 回答被渲染两遍 | 客户端 UI 行为（SSE 只有一组 delta） | 忽略 |
 | 注入某天突然失效 | 上游网关把 system 吞了 | 见上文「上游必须转发 system」 |
 | 回答只出一半，然后像正常结束一样停住 | 上游没有 `finish_reason`，旧版误发 `response.completed` | 升级本版：自动重试一次；仍失败会明确报错 |
+| 说文件已改好，实际没改；日志出现 `apply_patch invoked with incompatible payload` | custom/freeform 工具被当成普通 JSON 函数 | 升级本版：使用原生 `custom_tool_call` 和 `input` 字段 |
 | 每隔几分钟弹一个黑窗 | 计划任务/启动项里直接写了 `powershell.exe` 或 `.bat`（控制台先创建后隐藏） | 用 `wscript.exe` + vbs 包一层；本仓库的 `install` 已经这么做 |
 
 `doctor` 一次跑完：上游可达性、`/v1/models` 条数、身份探针、越界探针、注入层与 `max_tokens` 下限。
@@ -193,7 +196,7 @@ key 的解析顺序：`--api-key` → `WBXC_API_KEY` → `DEEPSEEK_API_KEY` / `O
 node test/smoke.mjs
 ```
 
-离线跑：起一个假上游，断言 system 只注入一次、两种方言都能通、SSE 事件序列完整、`/v1/models` 透传、`max_tokens` 被抬到下限。不需要 key、不联网。
+离线跑：起一个假上游，断言 system 只注入一次、两种方言都能通、SSE 事件序列完整、`/v1/models` 透传、`max_tokens` 被抬到下限、半截流会重试、自由格式工具保持原生 custom 调用。不需要 key、不联网。
 
 ---
 
