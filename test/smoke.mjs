@@ -53,6 +53,22 @@ const fake = http.createServer((req, res) => {
       }));
       return;
     }
+    // 回归用例：正文已流出后连接中断，不能把半截输出标成正常完成。
+    if (/__test_retry/.test(raw)) {
+      const prior = captured.filter((b) => JSON.stringify(b).includes('__test_retry')).length;
+      if (prior === 1) {
+        res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'HALF-ANSWER' } }] })}\n\n`);
+        res.end();
+        return;
+      }
+    }
+    if (req.headers['x-wbxc-test-abort'] === '1' || /__test_abort/.test(raw)) {
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'HALF-ANSWER' } }] })}\n\n`);
+      res.end();
+      return;
+    }
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
     const chunk = (delta, finish = null) => `data: ${JSON.stringify({
       id: 'chatcmpl-fake', choices: [{ index: 0, delta, finish_reason: finish }],
@@ -147,7 +163,35 @@ try {
       `实际 ${captured[0]?.max_tokens}`);
   }
 
-  // 3) 模型目录透传
+  // 3) 中途断流：已流出的半截正文绝不能被标成 response.completed。
+  {
+    const r = await fetch(`${base}/v1/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5-codex', stream: true, input: [{ role: 'user', content: [{ type: 'input_text', text: '半截输出' }] }, { type: 'message', role: 'user', content: [{ type: 'input_text', text: '__test_abort' }] }] }),
+    });
+    const sse = await r.text();
+    check(/event: response.failed/.test(sse), '中途断流发送 response.failed', sse.slice(-800));
+    check(!/event: response.completed/.test(sse), '半截正文不会标成 response.completed');
+    check(/HALF-ANSWER/.test(sse), '断流前的正文仍可被诊断');
+    check(/stream_interrupted/.test(sse), '错误类型是 stream_interrupted', sse.slice(-800));
+  }
+
+  // 4) 中途断流自动重试：只能重发，不得把半截正文续接到第二次回答。
+  {
+    captured.length = 0;
+    const r = await fetch(`${base}/v1/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5-codex', stream: true, input: [{ role: 'user', content: [{ type: 'input_text', text: '__test_retry' }] }] }),
+    });
+    const sse = await r.text();
+    check(captured.length === 2, '中途断流自动重试一次', `上游调用 ${captured.length} 次`);
+    check(/event: response.completed/.test(sse), '重试成功后正常完成', sse.slice(-700));
+    check(!/HALF-ANSWER/.test(sse), '重试不会重复半截正文');
+  }
+
+  // 5) 模型目录透传
   {
     const r = await fetch(`${base}/v1/models`);
     const j = await r.json();

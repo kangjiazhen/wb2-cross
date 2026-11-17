@@ -326,6 +326,37 @@ async function* upstreamEvents(res) {
   yield { type: 'eof' };
 }
 
+/**
+ * Buffer one upstream answer before translating it. A Responses stream cannot
+ * retract deltas that were already sent, so retrying after a partial answer
+ * would otherwise produce a corrupted message (half of attempt 1 + attempt 2).
+ * Two fresh attempts are made; only a complete answer is replayed to the client.
+ */
+async function collectUpstream(chat, label) {
+  const maxAttempts = 2;
+  let lastEvents = [];
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const events = [];
+    let sawFinish = false;
+    try {
+      const up = await callUpstream(chat);
+      for await (const ev of upstreamEvents(up)) {
+        events.push(ev);
+        if (ev.type === 'finish') sawFinish = true;
+      }
+      if (sawFinish) return { events, error: null };
+      lastError = new Error('upstream closed the stream before finish_reason; the answer is incomplete');
+    } catch (err) {
+      lastError = err;
+    }
+    lastEvents = events;
+    log(`[${label}] incomplete upstream answer, attempt ${attempt}/${maxAttempts}: ${String(lastError.message).slice(0, 240)}`);
+    if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, 400));
+  }
+  return { events: lastEvents, error: lastError || new Error('upstream answer incomplete') };
+}
+
 /* ---------------- Anthropic /v1/messages ---------------- */
 
 function anthSystemText(system) {
@@ -475,25 +506,8 @@ async function handleAnthropic(req, res, body) {
     blockKind = null;
   };
 
-  let up;
-  try {
-    up = await callUpstream(chat);
-  } catch (err) {
-    // Same reasoning as handleResponses: message_start already went out, so a
-    // JSON status code is impossible. Anthropic clients understand an `error`
-    // event mid-stream; without it Claude Code reports a bare connection loss.
-    log(`[err] ${err.message}`);
-    em.send('error', {
-      type: 'error',
-      error: {
-        type: err.status === 401 ? 'authentication_error' : 'api_error',
-        message: String(err.message).slice(0, 600),
-      },
-    });
-    em.end();
-    return;
-  }
-  for await (const ev of upstreamEvents(up)) {
+  const collected = await collectUpstream(chat, 'anth');
+  for (const ev of collected.events) {
     if (ev.type === 'text') {
       sawText = true;
       if (blockKind !== 'text') { closeBlock(); openBlock('text'); }
@@ -513,6 +527,15 @@ async function handleAnthropic(req, res, body) {
     } else if (ev.type === 'finish') {
       finishReason = ev.reason;
     }
+  }
+  if (collected.error) {
+    log(`[err] ${collected.error.message}`);
+    em.send('error', {
+      type: 'error',
+      error: { type: collected.error.status === 401 ? 'authentication_error' : 'api_error', message: String(collected.error.message).slice(0, 600) },
+    });
+    em.end();
+    return;
   }
   closeBlock();
   // 推理型模型可能把 max_tokens 全烧在 reasoning 上、正文为空；此时回落输出思考文本，避免空回复
@@ -678,32 +701,8 @@ async function handleResponses(req, res, body) {
     toolOpenIdx = -1;
   };
 
-  let up;
-  try {
-    up = await callUpstream(chat);
-  } catch (err) {
-    // SSE headers are already out, so the outer handler cannot answer with a
-    // JSON status any more: the client would only ever see "stream closed
-    // before response.completed" and report a generic network fault. Emit the
-    // documented failure event instead so 401 / gateway-down reach the user.
-    log(`[err] ${err.message}`);
-    em.send('response.failed', {
-      type: 'response.failed',
-      response: {
-        ...baseResponse,
-        status: 'failed',
-        error: {
-          code: err.status === 401 ? 'invalid_api_key' : 'upstream_error',
-          message: String(err.message).slice(0, 600),
-        },
-      },
-    });
-    em.end();
-    return;
-  }
-  let streamErr = null;
-  try {
-    for await (const ev of upstreamEvents(up)) {
+  const collected = await collectUpstream(chat, 'resp');
+  for (const ev of collected.events) {
       if (ev.type === 'text') {
         if (toolOpenIdx >= 0) closeToolItem();
         if (!textOpen) openTextItem();
@@ -738,9 +737,23 @@ async function handleResponses(req, res, body) {
         sawFinish = true;
         finishReason = String(ev.reason || '');
       }
-    }
-  } catch (err) {
-    streamErr = err;
+  }
+  // A missing finish_reason means the upstream connection ended in the middle
+  // of the answer. Never close those items as completed: Codex would stop after
+  // the visible half without telling the user that the answer is incomplete.
+  if (collected.error) {
+    const why = `upstream stream interrupted after retry: ${String(collected.error.message).slice(0, 300)}`;
+    log(`[err] ${why}`);
+    em.send('response.failed', {
+      type: 'response.failed',
+      response: {
+        ...baseResponse,
+        status: 'failed',
+        error: { code: collected.error.status === 401 ? 'invalid_api_key' : 'stream_interrupted', message: why },
+      },
+    });
+    em.end();
+    return;
   }
   // reasoning-only 回复（正文为空）时回落输出思考文本，避免空 output
   if (!textOpen && toolOpenIdx < 0 && reasoningBuf.trim()) {
@@ -752,23 +765,21 @@ async function handleResponses(req, res, body) {
   closeToolItem();
 
   const produced = finalOutput.length > 0;
-  log(`[resp] done finish=${finishReason || (streamErr ? 'error' : 'none')} text=${textBuf.length} reason=${reasoningBuf.length} items=${finalOutput.length}`);
+  log(`[resp] done finish=${finishReason || 'none'} text=${textBuf.length} reason=${reasoningBuf.length} items=${finalOutput.length}`);
   // Upstream ended without ever finishing (gateway idle timeout, socket reset,
   // account swap) and nothing was produced. Reporting `completed` with an empty
   // output is what made the turn look like "it thought, then silently stopped".
   if (!produced) {
-    const why = streamErr
-      ? `upstream stream interrupted: ${String(streamErr.message).slice(0, 300)}`
-      : finishReason
-        ? `upstream finished with no output (finish_reason=${finishReason}, reasoning=${reasoningBuf.length}ch)`
-        : 'upstream closed the stream before any output was produced';
+    const why = finishReason
+      ? `upstream finished with no output (finish_reason=${finishReason}, reasoning=${reasoningBuf.length}ch)`
+      : 'upstream closed the stream before any output was produced';
     log(`[err] ${why}`);
     em.send('response.failed', {
       type: 'response.failed',
       response: {
         ...baseResponse,
         status: 'failed',
-        error: { code: streamErr ? 'stream_interrupted' : 'empty_output', message: why },
+        error: { code: 'empty_output', message: why },
       },
     });
     em.end();
